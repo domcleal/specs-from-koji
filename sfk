@@ -30,12 +30,14 @@ opts = GetoptLong.new(
   [ '--tag', '-t', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--output-dir', '-o', GetoptLong::REQUIRED_ARGUMENT ],
   [ '--no-commit', GetoptLong::NO_ARGUMENT ],
+  [ '--exclude', '-e', GetoptLong::REQUIRED_ARGUMENT ],
 )
 
 endpoint_url = nil
 output_dir = '.'
 commit = true
 tags = []
+excludes = []
 opts.each do |opt, arg|
   case opt
   when '--help'
@@ -57,6 +59,9 @@ Usage: sfk -h <kojihub endpoint> -t <tag to retrieve specs from> [OPTIONS] ... [
 --no-commit
      don't run "git commit" after each package
 
+--exclude, -e
+     exclude packages matching this regexp
+
 EOF
     exit 1
   when '--host'
@@ -67,6 +72,8 @@ EOF
     output_dir = arg
   when '--no-commit'
     commit = false
+  when '--exclude'
+    excludes << Regexp.new(arg)
   end
 end
 
@@ -108,6 +115,7 @@ builds = []
 tags.each do |t|
   xmlrpc_call(server, 'listTaggedRPMS', t, nil, nil, true, nil, 'src')[0].each do |b|
     next unless packages.empty? || packages.include?(b['name'])
+    next if excludes.find { |e| e.match(b['name']) }
 
     # squash dist away
     b['generic_release'] = b['release'].gsub /\.(el|fc)\d+/, '.DIST'
