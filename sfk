@@ -34,7 +34,7 @@ opts = GetoptLong.new(
 )
 
 endpoint_url = nil
-output_dir = '.'
+output_dir = Dir.pwd
 commit = true
 tags = []
 excludes = []
@@ -84,10 +84,11 @@ if tags.empty? || endpoint_url.nil? || endpoint_url.host.nil?
   exit 1
 end
 
-unless File.exist?(File.join(output_dir, '.git'))
+unless Dir.chdir(output_dir) { `git rev-parse 2>/dev/null`; $?.success? }
   puts "Output directory doesn't exist or isn't a git repo"
   exit 1
 end
+output_dir = File.expand_path(output_dir)
 git_start = Dir.chdir(output_dir) { `git rev-parse --short HEAD 2>/dev/null`.chomp }
 
 ## Initialise
