@@ -1,0 +1,195 @@
+#!/usr/bin/env ruby
+# vim: ts=2:sw=2:et
+#
+# sfk: spec from koji
+#
+# Copyright 2013 Red Hat Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+require 'getoptlong'
+require 'tmpdir'
+require 'uri'
+require 'xmlrpc/client'
+
+## Arg parsing
+
+opts = GetoptLong.new(
+  [ '--help', GetoptLong::NO_ARGUMENT ],
+  [ '--host', '-h', GetoptLong::REQUIRED_ARGUMENT ],
+  [ '--tag', '-t', GetoptLong::REQUIRED_ARGUMENT ],
+  [ '--output-dir', '-o', GetoptLong::REQUIRED_ARGUMENT ],
+  [ '--no-commit', GetoptLong::NO_ARGUMENT ],
+)
+
+endpoint_url = nil
+output_dir = '.'
+commit = true
+tags = []
+opts.each do |opt, arg|
+  case opt
+  when '--help'
+    puts <<-EOF
+Usage: sfk -h <kojihub endpoint> -t <tag to retrieve specs from> [OPTIONS] ... [PACKAGE]
+
+-h, --help:
+     show help
+
+--host <kojihub endpoint>, -h
+     URL to the kojihub XML-RPC endpoint, e.g. http://koji.fedoraproject.org/kojihub
+
+--tag <tag>, -t
+     tag to retrieve packages and specs from, may be passed multiple times
+
+--output-dir <output dir>, -o
+     output directory to store specs
+
+--no-commit
+     don't run "git commit" after each package
+
+EOF
+    exit 1
+  when '--host'
+    endpoint_url = URI.parse(arg)
+  when '--tag'
+    tags << arg
+  when '--output-dir'
+    output_dir = arg
+  when '--no-commit'
+    commit = false
+  end
+end
+
+packages = ARGV.dup
+
+if tags.empty? || endpoint_url.nil? || endpoint_url.host.nil?
+  puts "Missing tag(s) and/or endpoint URL, try --help"
+  exit 1
+end
+
+unless File.exist?(File.join(output_dir, '.git'))
+  puts "Output directory doesn't exist or isn't a git repo"
+  exit 1
+end
+git_start = Dir.chdir(output_dir) { `git rev-parse --short HEAD 2>/dev/null`.chomp }
+
+## Initialise
+path = endpoint_url.path.empty? ? '/kojihub' : endpoint_url.path
+server = XMLRPC::Client.new(endpoint_url.host, path, endpoint_url.port || 80)
+
+v, $VERBOSE = $VERBOSE, nil
+# causes warning, but needed for handling python's "None"
+XMLRPC::Config::ENABLE_NIL_CREATE = true 
+XMLRPC::Config::ENABLE_NIL_PARSER = true 
+$VERBOSE = v
+
+def xmlrpc_call(server, *args)
+  begin
+    server.call(*args)
+  rescue XMLRPC::FaultException => e
+    raise "#{e.faultCode} #{e.faultString}"
+  end
+end
+
+# Get every build, find newest nvrs, excluding the dist since we'll assume the
+# same package was built for multiple dists from the same spec
+# listTaggedRPMS(self,tag,event=None,inherit=False,latest=False,package=None,arch=None,rpmsigs=False,owner=None,type=None):
+builds = []
+tags.each do |t|
+  xmlrpc_call(server, 'listTaggedRPMS', t, nil, nil, true, nil, 'src')[0].each do |b|
+    next unless packages.empty? || packages.include?(b['name'])
+
+    # squash dist away
+    b['generic_release'] = b['release'].gsub /\.(el|fc)\d+/, '.DIST'
+    if b['nvr']
+      b['nvr'].gsub! /\.(el|fc)\d+/, '.DIST'
+    else
+      b['nvr'] = "#{b['name']}-#{b['version']}-#{b['generic_release']}"
+    end
+
+    # check if this is newer than any we've previously found
+    existing = builds.find { |eb| eb['name'] == b['name'] }
+    if existing
+      `rpmdev-vercmp #{existing['nvr']} #{b['nvr']}`
+      builds << b if $? == 12  # b['nvr'] is newer
+    else
+      builds << b
+    end
+  end
+end
+
+# Filter to all builds that have a different vr to the spec file on disk, or
+# are new
+changed_builds = builds.find_all do |b|
+  spec_path = File.join(output_dir, b['name'], '*.spec')
+  if !Dir.glob(spec_path).empty?
+    disk_nvr = `rpm --specfile #{spec_path} --define "dist .DIST" --qf "%{nvr}\n" | head -n1`.chomp
+    puts "Update found: #{disk_nvr} is now #{b['nvr']}" if disk_nvr != b['nvr']
+    disk_nvr != b['nvr']
+  else
+    puts "New package found: #{b['name']}"
+    true
+  end
+end
+
+# Now download SRPMs and extract specs
+changed_builds.each do |b|
+  srpm_name = "#{b['name']}-#{b['version']}-#{b['release']}.src.rpm"
+  srpm_path = "/packages/#{b['name']}/#{b['version']}/#{b['release']}/src/#{srpm_name}"
+
+  Dir.mktmpdir("srpm-#{b['name']}") do |dir|
+    puts "Fetching #{srpm_name}"
+    Net::HTTP.start(endpoint_url.host, endpoint_url.port) do |http|
+      resp = http.get(srpm_path)
+      open("#{dir}/srpm", 'wb') do |f|
+        f.write(resp.body)
+      end
+    end
+
+    # Extract SRPM and copy the spec and patches out
+    Dir.chdir(dir) do
+      `rpm2cpio srpm | cpio -di 2>/dev/null`
+      raise "can't find *.spec from #{srpm_name} SRPM" if Dir.glob(File.join(dir, '*.spec')).empty?
+
+      # exclude tarballs and gems
+      src_files = Dir.glob("*").reject { |f| f == 'srpm' || f =~ /\.(tar|gem)(\.\S+)?$/ }
+      src_files.reject! { |f| File.size(f) > 1024*1024 }
+
+      # synchronise directories
+      package_dir = File.join(output_dir, b['name'])
+      FileUtils.mkdir(package_dir) unless File.exist? package_dir
+      FileUtils.cp src_files, package_dir
+      Dir.glob("#{package_dir}/*").each do |f|
+        FileUtils.rm f unless File.exist?(File.basename(f))
+      end
+    end
+  end
+
+  Dir.chdir(output_dir) do
+    `git add #{b['name']}`
+    `git ci -m "Update #{b['name']} to #{b['version']}-#{b['release']}"` if commit
+  end
+end
+
+if commit
+  git_end = Dir.chdir(output_dir) { `git rev-parse --short HEAD`.chomp }
+  if git_start == git_end
+    puts "No changes made"
+  elsif git_start.empty?
+    puts "Repo has been initialised, see `git log #{git_end}`"
+  else
+    puts "Changes made, see `git log #{git_start}..#{git_end}`"
+  end
+else
+  Dir.chdir(output_dir) { puts `git status` }
+end
