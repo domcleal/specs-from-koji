@@ -142,7 +142,7 @@ end
 changed_builds = builds.find_all do |b|
   spec_path = File.join(output_dir, b['name'], '*.spec')
   if !Dir.glob(spec_path).empty?
-    disk_nvr = `rpm --specfile #{spec_path} --define "dist .DIST" --qf "%{VERSION}-%{RELEASE}\n" | head -n1`.chomp
+    disk_nvr = `rpm -q --specfile #{spec_path} --define "dist .DIST" --qf "%{VERSION}-%{RELEASE}\n" | head -n1`.chomp
     vr = "#{b['version']}-#{b['generic_release']}"
     puts "Update found: #{disk_nvr} is now #{vr}" if disk_nvr != vr
     disk_nvr != vr
@@ -187,7 +187,7 @@ changed_builds.each do |b|
 
   Dir.chdir(output_dir) do
     `git add -A #{b['name']}`
-    `git ci -m "Update #{b['name']} to #{b['version']}-#{b['release']}"` if commit
+    `git commit -m "Update #{b['name']} to #{b['version']}-#{b['release']}"` if commit
   end
 end
 
