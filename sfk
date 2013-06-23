@@ -184,7 +184,7 @@ changed_builds.each do |b|
   end
 
   Dir.chdir(output_dir) do
-    `git add #{b['name']}`
+    `git add -A #{b['name']}`
     `git ci -m "Update #{b['name']} to #{b['version']}-#{b['release']}"` if commit
   end
 end
