@@ -44,7 +44,7 @@ opts.each do |opt, arg|
     puts <<-EOF
 Usage: sfk -h <kojihub endpoint> -t <tag to retrieve specs from> [OPTIONS] ... [PACKAGE]
 
--h, --help:
+--help:
      show help
 
 --host <kojihub endpoint>, -h
