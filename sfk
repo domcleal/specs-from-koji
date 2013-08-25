@@ -157,6 +157,7 @@ changed_builds.each do |b|
   srpm_name = "#{b['name']}-#{b['version']}-#{b['release']}.src.rpm"
   srpm_path = "/packages/#{b['name']}/#{b['version']}/#{b['release']}/src/#{srpm_name}"
 
+  changelog = []
   Dir.mktmpdir("srpm-#{b['name']}") do |dir|
     puts "Fetching #{srpm_name}"
     Net::HTTP.start(endpoint_url.host, endpoint_url.port) do |http|
@@ -170,24 +171,48 @@ changed_builds.each do |b|
     Dir.chdir(dir) do
       `rpm2cpio srpm | cpio -di 2>/dev/null`
       raise "can't find *.spec from #{srpm_name} SRPM" if Dir.glob(File.join(dir, '*.spec')).empty?
+      package_dir = File.join(output_dir, b['name'])
+
+      # find new changelog entries since existing spec file's NVR
+      new_spec = Dir.glob(File.join(dir, '*.spec')).first
+      old_spec = Dir.glob(File.join(package_dir, '*.spec')).first
+      if old_spec
+        old_nvr = `rpm -q --specfile #{old_spec} --define "dist .DIST" --qf "%{VERSION}-%{RELEASE}\n" | head -n1`.chomp
+        raise "can't find old NVR from #{old_spec}" unless old_nvr
+        found_old_nvr = false
+        `rpm -q --specfile #{new_spec} --changelog`.each_line do |centry|
+          if centry =~ Regexp.new("^\*.*\s+#{Regexp.escape(old_nvr).chomp('.DIST')}\s*$")
+            found_old_nvr = true
+            break
+          end
+          changelog << centry if centry.start_with?('-')
+        end
+        changelog.clear unless found_old_nvr
+      end
 
       # exclude tarballs and gems
       src_files = Dir.glob("*").reject { |f| f == 'srpm' || f =~ /\.(tar|gem)(\.\S+)?$/ }
       src_files.reject! { |f| File.size(f) > 1024*1024 }
 
       # synchronise directories
-      package_dir = File.join(output_dir, b['name'])
       FileUtils.mkdir(package_dir) unless File.exist? package_dir
       FileUtils.cp src_files, package_dir
       Dir.glob("#{package_dir}/*").each do |f|
         FileUtils.rm f unless File.exist?(File.basename(f))
       end
-    end
-  end
 
-  Dir.chdir(output_dir) do
-    `git add -A #{b['name']}`
-    `git commit -m "Update #{b['name']} to #{b['version']}-#{b['release']}"` if commit
+      # prepare a full git commit message with changelog
+      File.open('git_changelog', 'w') do |f|
+        f.write("Update #{b['name']} to #{b['version']}-#{b['release']}")
+        f.write("\n\n") unless changelog.empty?
+        changelog.each { |centry| f.write(centry) }
+      end
+    end
+
+    Dir.chdir(output_dir) do
+      `git add -A #{b['name']}`
+      `git commit -F #{dir}/git_changelog` if commit
+    end
   end
 end
 
