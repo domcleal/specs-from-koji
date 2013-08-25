@@ -195,7 +195,8 @@ changed_builds.each do |b|
       src_files.reject! { |f| File.size(f) > 1024*1024 }
 
       # synchronise directories
-      FileUtils.mkdir(package_dir) unless File.exist? package_dir
+      new_package = !File.exist?(package_dir)
+      FileUtils.mkdir(package_dir) if new_package
       FileUtils.cp src_files, package_dir
       Dir.glob("#{package_dir}/*").each do |f|
         FileUtils.rm f unless File.exist?(File.basename(f))
@@ -203,9 +204,13 @@ changed_builds.each do |b|
 
       # prepare a full git commit message with changelog
       File.open('git_changelog', 'w') do |f|
-        f.write("Update #{b['name']} to #{b['version']}-#{b['release']}")
-        f.write("\n\n") unless changelog.empty?
-        changelog.each { |centry| f.write(centry) }
+        if new_package
+          f.write("New package #{b['name']}, version #{b['version']}-#{b['release']}")
+        else
+          f.write("Update #{b['name']} to #{b['version']}-#{b['release']}")
+          f.write("\n\n") unless changelog.empty?
+          changelog.each { |centry| f.write(centry) }
+        end
       end
     end
 
